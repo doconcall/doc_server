@@ -1,0 +1,20 @@
+{
+  "name": "doc",
+  "version": "1.0.0",
+  "description": "doctor on call",
+  "main": "handler.js",
+  "scripts": {},
+  "author": "aR",
+  "license": "MIT",
+  "dependencies": {
+    "aws-serverless-express": "^3.0.2",
+    "crypto2": "^0.3.2",
+    "dynamodb": "^1.0.0",
+    "express": "^4.16.2",
+    "express-graphql": "^0.6.11",
+    "fcm-push": "^1.1.3",
+    "geolib": "^2.0.24",
+    "graphql": "^0.11.7",
+    "joi": "^11.4.0"
+  }
+}
