@@ -11,18 +11,24 @@ class Database {
 		this.updateItem = this.updateItem.bind(this);
 	}
 	
+	/**
+	 * initialize tables. Tables can accessed this.tableName
+	 * where tableName can be any defined table name
+	 * @param tableName: name of the table
+	 * @param tableSchema: schema of the table
+	 * @returns {Database}
+	 */
 	describeTable(tableName, tableSchema) {
 		this[tableName] = dynamo.define(tableName, tableSchema);
 		return this;
 	}
 	
 	createTables() {
-		return new Promise((resolve, reject) => {
+		return new Promise((resolve, reject) =>
 			dynamo.createTables(err => {
 				if (err) return reject(err);
 				resolve(true);
-			});
-		});
+			}));
 	}
 	
 	putItems(tableName, items) {

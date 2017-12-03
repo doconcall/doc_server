@@ -13,11 +13,22 @@ const FCM = require('fcm-push');
 const Database = require('./dynamoDBWrapper');
 const {findNearby, clone, serverKey} = require('./local');
 
+/**
+ * puts current timestamp to desired object property
+ * @param obj: the object to put timestamp on
+ * @param property: the property to access the timestamp with
+ * @returns the object passed as obj
+ */
 function putTimestamp(obj, property) {
 	obj[property] = new Date().getTime();
 	return obj;
 }
 
+/**
+ * does a sha256 hash on the password field of the object
+ * @param obj: the object whose password needs to be hashed
+ * @returns {Promise}: returns an asynchronous promise that'll be resolved after hashing is complete
+ */
 function hashPassword(obj) {
 	return new Promise((resolve, reject) =>
 		crypto.hash.sha256(obj.password,
@@ -28,16 +39,28 @@ function hashPassword(obj) {
 			}));
 }
 
-function sendResolved(database, dids, selected, fcm, id) {
-	if(!dids) return [];
-	let rejected = dids.filter(doctorID => doctorID !== selected);
+/**
+ * sends request resolved notification to other doctors or transit service
+ * @param database: the database object to search doctors or transit service in
+ * @param eids: can be dids or tids, all the people who have received the request notification
+ * @param selected: the id of doctor or transit service who has accepted the request
+ * @param fcm: the object that will send the resolved notification
+ * @param id: id of the request which has been resolved
+ * @param table: the table to search deviceID of filtered email ids
+ * @returns {Promise} the promise that will execute everything sequentially
+ */
+function sendResolved(database, eids, selected, fcm, id, table) {
+	if (!eids) return [];
 	//get device id of all doctors who are not selected
+	let rejected = eids.filter(doctorID => doctorID !== selected);
+	//if none were filtered, we simply return null to do nothing
 	if (rejected.length === 0) return null;
-	Database.getResult(database.getQueryBuilder('doctor')
+	//get the deviceID of filtered email ids
+	return Database.getResult(database.getQueryBuilder(table)
 		.where('email').in(rejected))
 		.then(deviceIDs =>
 			Promise.all(
-				//send resolved notification to each doctor
+				//send resolved notification to each doctor or transit service
 				([].concat(deviceIDs))
 					.map(({deviceID}) =>
 						deviceID && deviceID !== "null" ?
@@ -154,12 +177,14 @@ const transitRequest = new GraphQLObjectType({
 	})
 });
 
+//define the actual graphQL schema
 module.exports = (database) =>
 	new GraphQLSchema({
 		query: new GraphQLObjectType({
 			name: 'query',
 			description: 'methods for GET requests',
 			fields: () => ({
+				//test function, ignore
 				hello: {
 					type: GraphQLString,
 					description: 'GET test request',
@@ -171,6 +196,7 @@ module.exports = (database) =>
 					},
 					resolve: (parent, args) => `hello ${( args.name || 'world')}`
 				},
+				//login method for doctor
 				doctor: {
 					type: doctorType,
 					description: 'login method for doctor',
@@ -187,30 +213,23 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, args) =>
+						//we hash the password provided and the fetch doctor's information simultaneously
 						Promise.all([
 								hashPassword({password: args.password}),
 								Database.getResult(database.getQueryBuilder('doctor')
 									.where('email').equals(args.email))
 							])
 							.then(results => {
+								//if we don't find the doctor with given email id, we throw 404 not found
 								if (results[1].length === 0) throw new Error(404);
 								let {password} = results[0];
+								//if passwords don't match, we throw unauthorized 401
 								if (password !== results[1].password) throw new Error(401);
+								//return the information, since credibility checks out
 								return results[1];
 							})
 				},
-				/*doctors: {
-					type: new GraphQLList(doctorType),
-					description:'get info of doctors',
-					args: {
-						ids: {
-							name: 'ids',
-							description:'',
-							type: new GraphQLNonNull(GraphQLString)
-						}
-					},
-					resolve: (parent, args) => Database.getResult(database.getQueryBuilder('doctor').where('email').in(JSON.parse(args.ids)))
-				},*/
+				//login method for client
 				client: {
 					type: clientType,
 					description: 'login method for client',
@@ -227,18 +246,23 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, args) =>
+						//we hash the password provided and the fetch doctor's information simultaneously
 						Promise.all([
 								hashPassword({password: args.password}),
 								Database.getResult(database.getQueryBuilder('client')
 									.where('email').equals(args.email))
 							])
 							.then(results => {
+								//if we don't find the doctor with given email id, we throw 404 not found
 								if (results[1].length === 0) throw new Error(404);
 								let {password} = results[0];
+								//if passwords don't match, we throw unauthorized 401
 								if (password !== results[1].password) throw new Error(401);
+								//return the information, since credibility checks out
 								return results[1];
 							})
 				},
+				//login method for transit service
 				transit: {
 					type: transitType,
 					description: 'login method for transit',
@@ -255,18 +279,23 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, args) =>
+						//we hash the password provided and the fetch doctor's information simultaneously
 						Promise.all([
 								hashPassword({password: args.password}),
 								Database.getResult(database.getQueryBuilder('transit')
 									.where('email').equals(args.email))
 							])
 							.then(results => {
+								//if we don't find the doctor with given email id, we throw 404 not found
 								if (results[1].length === 0) throw new Error(404);
 								let {password} = results[0];
+								//if passwords don't match, we throw unauthorized 401
 								if (password !== results[1].password) throw new Error(401);
+								//return the information, since credibility checks out
 								return results[1];
 							})
 				},
+				//method to fetch sos history
 				sosHistory: {
 					type: new GraphQLList(sosRequest),
 					description: 'sosRequest history method',
@@ -288,21 +317,28 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, args) =>
+						//hash the provided password
 						hashPassword({password: args.password})
 							.then(({password}) =>
+								//find if the user exists with given credentials
 								Database.getResult(database.getQueryBuilder(args.type)
 									.where('email').equals(args.email)
 									.where('password').equals(password)))
 							.then(result => {
+								//user doesn't exist throw 401
 								if (result.length === 0) throw new Error(401);
+								//if the user is doctor, search for all sosHistory entries where dids have doctor's email in them
 								if (args.type === 'doctor')
 									return Database.getResult(database.getQueryBuilder('request')
 										.where('dids').contains(args.email));
+								//if the user is client, search for all sosHistory entries where cid equals client's email
 								else return Database.getResult(database.getQueryBuilder('request')
 									.where('cid').equals(args.email));
 							})
+							//if only one entry was found, we concat that to an empty array
 							.then(results => [].concat(results))
 				},
+				//method to fetch sos history
 				transitHistory: {
 					type: new GraphQLList(transitRequest),
 					description: 'transitRequest history method',
@@ -324,21 +360,27 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, args) =>
+						//hash the provided password
 						hashPassword({password: args.password})
 							.then(({password}) =>
+								//find if the user exists with given credentials
 								Database.getResult(database.getQueryBuilder(args.type)
 									.where('email').equals(args.email)
 									.where('password').equals(password)))
 							.then(result => {
+								//user doesn't exist throw 401
 								if (result.length === 0) throw new Error(401);
+								//if the user is transit service, search for all transitHistory entries where tids have transit's email in them
 								if (args.type === 'transit')
 									return Database.getResult(database.getQueryBuilder('transitRequest')
 										.where('tids').contains(args.email));
+								//if the user is doctor, search for all transitHistory entries where cid equals doctor's email
 								else return Database.getResult(database.getQueryBuilder('transitRequest')
 									.where('did').equals(args.email));
 							})
 							.then(results => [].concat(results))
 				},
+				//get info for details
 				getInfo: {
 					type: GraphQLString,
 					description: 'info of any doctor, client or transit',
@@ -370,19 +412,25 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, {fromEmail, fromPassword, fromType, requestEmail, requestType}) =>
+						//we hash the password provided and the fetch doctor's information simultaneously
 						Promise.all([
 								hashPassword({password: fromPassword}),
 								Database.getResult(database.getQueryBuilder(fromType)
 									.where('email').equals(fromEmail))
 							])
 							.then(results => {
+								//if we don't find the doctor with given email id, we throw 404 not found
 								if (results[1].length === 0) throw new Error(404);
+								//if passwords don't match, we throw unauthorized 401
 								if (results[0].password !== results[1].password) throw new Error(401);
+								//get the actual data that was requested from the database
 								return Database.getResult(database.getQueryBuilder(requestType)
 									.where('email').equals(requestEmail))
 							})
 							.then(data => {
+								//if requested id doesn't exist, throw a 404 not found
 								if (data.length === 0) throw new Error(404);
+								//delete sensitive information
 								delete data.password;
 								delete data.deviceID;
 								delete data.updatedAt;
@@ -393,6 +441,7 @@ module.exports = (database) =>
 									delete data.accepted;
 									delete data.total;
 								}
+								//convert JSON to string and pass it to the server
 								return JSON.stringify(data);
 							})
 				}
@@ -402,6 +451,7 @@ module.exports = (database) =>
 			name: 'mutation',
 			description: 'methods for PUT, POST requests',
 			fields: () => ({
+				//test function, ignore
 				hello: {
 					type: GraphQLString,
 					description: 'PUT test method',
@@ -413,6 +463,7 @@ module.exports = (database) =>
 					},
 					resolve: (parent, args) => `hello ${( args.name || 'world')}`
 				},
+				//signup method for new doctors
 				newDoctor: {
 					type: doctorType,
 					description: 'sign up method for doctor',
@@ -424,10 +475,13 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, {doctor}) =>
+						//hash the password provided
 						hashPassword(JSON.parse(doctor))
+						//put timestamp
 							.then(hashed => database.putItems('doctor', Object.assign({accepted: 0, total: 0},
 								putTimestamp(hashed, 'createdAt'))))
 				},
+				//signup method for new clients
 				newClient: {
 					type: clientType,
 					description: 'sign up method for client',
@@ -439,9 +493,12 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, {client}) =>
+						//hash the password provided
 						hashPassword(JSON.parse(client))
+						//put timestamp
 							.then(hashed => database.putItems('client', putTimestamp(hashed, 'createdAt')))
 				},
+				//signup method for new transit services
 				newTransit: {
 					type: transitType,
 					description: 'sign up method for transit',
@@ -453,10 +510,13 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, {transit}) =>
+						//hash the password provided
 						hashPassword(JSON.parse(transit))
 							.then(hashed => database.putItems('transit', Object.assign({accepted: 0, total: 0},
+								//put timestamp
 								putTimestamp(hashed, 'createdAt'))))
 				},
+				//creates a new sos request
 				newSOS: {
 					type: sosRequest,
 					description: 'method to broadcast new sosRequest from only client',
@@ -485,11 +545,13 @@ module.exports = (database) =>
 					},
 					resolve: (parent, args) => {
 						let fcm = new FCM(serverKey);
+						//hash the password for authentication
 						return hashPassword({password: args.password})
 							.then(({password}) => Database.getResult(database.getQueryBuilder('client')
 								.where('email').equals(args.email)
 								.where('password').equals(password)))
 							.then(result => {
+								//if we don't find the client with provided credentials, we throw 401 unauthorized
 								if (result.length === 0) throw new Error(401);
 								//find nearby doctors
 								return findNearby(database, 'doctor', Object.assign(JSON.parse(args.sos), {resolved: false}), args.radius, 'dids')
@@ -523,6 +585,7 @@ module.exports = (database) =>
 							.then(results => results[0])
 					}
 				},
+				//extends the range of an existing sos range
 				extendRange: {
 					type: sosRequest,
 					description: 'method to extend search radius of any existing sosRequest',
@@ -550,6 +613,7 @@ module.exports = (database) =>
 					},
 					resolve: (parent, args) => {
 						let fcm = new FCM(serverKey);
+						//hash the password for authentication
 						return hashPassword({password: args.password})
 							.then(({password}) => Database.getResult(database.getQueryBuilder('client')
 								.where('email').equals(args.email)
@@ -599,6 +663,7 @@ module.exports = (database) =>
 						
 					}
 				},
+				//create new transit request
 				newTransitRequest: {
 					type: transitRequest,
 					description: 'method to broadcast new transit request from only doctors',
@@ -627,19 +692,22 @@ module.exports = (database) =>
 					resolve: (parent, args) => {
 						let transitReq = null;
 						let fcm = new FCM(serverKey);
+						//hash the password for authentication
 						return hashPassword({password: args.password})
 							.then(({password}) => Database.getResult(database.getQueryBuilder('doctor')
 								.where('email').equals(args.email)
 								.where('password').equals(password)))
 							.then(result => {
+								//if the doctor with provided credentials doesn't exist, throw a 401 unauthorized
 								if (result.length === 0) throw new Error(401);
 								//find nearby transits
 								return findNearby(database, 'transit', Object.assign(JSON.parse(args.request), {resolved: false}), args.radius, 'tids')
 							})
-							.then(trans => database.putItems('transitRequest', putTimestamp(trans, 'createdAt')))
-							.then(trans =>
+							//put the request in the table
+							.then(request => database.putItems('transitRequest', putTimestamp(request, 'createdAt')))
+							.then(request =>
 								Promise.all(
-									(transitReq = trans).tids
+									(transitReq = request).tids
 										.map(transit =>
 											//update each transit service stat
 											database.updateItem('transit', putTimestamp({
@@ -665,6 +733,7 @@ module.exports = (database) =>
 							.then(updated => transitReq)
 					}
 				},
+				//updates the coordinates of doctors and transit services
 				updateLocation: {
 					type: GraphQLBoolean,
 					description: 'method to update location',
@@ -691,23 +760,30 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, {email, location, type, password}) => {
+						//clients are not required to update the location, throw a 405 method not allowed
 						if (type === 'client') throw new Error(405);
+						//hash the password
 						return hashPassword({password: password})
+						//search for user with given credentials
 							.then(obj => Database.getResult(database.getQueryBuilder(type)
 								.where('email').equals(email)
 								.where('password').equals(obj.password)))
 							.then(result => {
+								//if not found, throw a 401 not found
 								if (result.length === 0) throw new Error(401);
 								let {lat, lon} = JSON.parse(location);
+								//update the coordinates in the respective table
 								return database.updateItem(type, putTimestamp({
 									email: email,
 									lat: lat,
 									lon: lon
 								}, 'updatedAt'));
 							})
+							//send back that update was successful
 							.then(update => true);
 					}
 				},
+				//updates the deviceID of any user
 				updateDeviceID: {
 					type: GraphQLBoolean,
 					description: 'method to update deviceID',
@@ -734,18 +810,25 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, {type, email, password, deviceID}) =>
+						//hash the password provided
 						hashPassword({password: password})
+						//find the user with provided credentials
 							.then(obj => Database.getResult(database.getQueryBuilder(type)
 								.where('email').equals(email)
 								.where('password').equals(obj.password)))
 							.then(result => {
+								//if not found, throw a 401 not found
 								if (result.length === 0) throw new Error(401);
+								//update the table with the provided deviceID
 								return database.updateItem(type, putTimestamp({
 									email: email,
 									deviceID: deviceID
-								}, 'updatedAt')).then(data => true);
+								}, 'updatedAt'))
 							})
+							//send the user that update was successful
+							.then(data => true)
 				},
+				//update client information
 				updateClient: {
 					type: clientType,
 					description: 'method to update details of the client',
@@ -767,9 +850,12 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, args) =>
+						//hash the password provided
 						hashPassword({password: args.password})
 							.then(({password}) => {
+								//parse the mutation
 								let parsed = JSON.parse(args.mutation);
+								//we verify the credentials and if password change was provided, we hash that simultaneously
 								return Promise.all([
 									Database.getResult(database.getQueryBuilder('client')
 										.where('email').equals(args.email)
@@ -778,15 +864,20 @@ module.exports = (database) =>
 								]);
 							})
 							.then(results => {
+								//if not found, we throw a 401 not found
 								if (results[0].length === 0) throw new Error(401);
-								if (results[0].info) {
+								//if info was mutated, we need to make sure all fields in the info are copied
+								//otherwise they'll be deleted
+								if (results[1].info) {
 									results[0].info = Object.assign(results[0].info, results[1].info);
 									delete results[1].info;
 								}
+								//put the mutation to the table
 								return database.updateItem('client',
 									putTimestamp(Object.assign(results[0], results[1]), 'updatedAt'));
 							})
 				},
+				//update doctor information
 				updateDoctor: {
 					type: doctorType,
 					description: 'method to update details of the doctor',
@@ -808,9 +899,12 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, args) =>
+						//hash the password provided
 						hashPassword({password: args.password})
 							.then(({password}) => {
+								//parse the mutation
 								let parsed = JSON.parse(args.mutation);
+								//we verify the credentials and if password change was provided, we hash that simultaneously
 								return Promise.all([
 									Database.getResult(database.getQueryBuilder('doctor')
 										.where('email').equals(args.email)
@@ -819,16 +913,20 @@ module.exports = (database) =>
 								]);
 							})
 							.then(results => {
+								//if not found, we throw a 401 not found
 								if (results[0].length === 0) throw new Error(401);
-								if (results[0].length === 0) throw new Error(401);
-								if (results[0].info) {
+								//if info was mutated, we need to make sure all fields in the info are copied
+								//otherwise they'll be deleted
+								if (results[1].info) {
 									results[0].info = Object.assign(results[0].info, results[1].info);
 									delete results[1].info;
 								}
+								//put the mutation to the table
 								return database.updateItem('doctor',
 									putTimestamp(Object.assign(results[0], results[1]), 'updatedAt'));
 							})
 				},
+				//update transit information
 				updateTransit: {
 					type: transitType,
 					description: 'method to update details of the transit',
@@ -850,9 +948,12 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, args) =>
+						//hash the password provided
 						hashPassword({password: args.password})
 							.then(({password}) => {
+								//parse the mutation
 								let parsed = JSON.parse(args.mutation);
+								//we verify the credentials and if password change was provided, we hash that simultaneously
 								return Promise.all([
 									Database.getResult(database.getQueryBuilder('transit')
 										.where('email').equals(args.email)
@@ -861,16 +962,20 @@ module.exports = (database) =>
 								]);
 							})
 							.then(results => {
+								//if not found, we throw a 401 not found
 								if (results[0].length === 0) throw new Error(401);
-								if (results[0].length === 0) throw new Error(401);
-								if (results[0].info) {
+								//if info was mutated, we need to make sure all fields in the info are copied
+								//otherwise they'll be deleted
+								if (results[1].info) {
 									results[0].info = Object.assign(results[0].info, results[1].info);
 									delete results[1].info;
 								}
+								//put the mutation to the table
 								return database.updateItem('transit',
 									putTimestamp(Object.assign(results[0], results[1]), 'updatedAt'));
 							})
 				},
+				//method for doctor to accept a sos
 				acceptSOS: {
 					type: clientType,
 					description: 'method to accept an existing sosRequest',
@@ -893,11 +998,14 @@ module.exports = (database) =>
 					},
 					resolve: (parent, args) => {
 						let fcm = new FCM(serverKey);
+						//hash the password provided
 						return hashPassword({password: args.password})
+						//we search for the user with provided credentials
 							.then(({password}) => Database.getResult(database.getQueryBuilder('doctor')
 								.where('email').equals(args.did)
 								.where('password').equals(password)))
 							.then(result => {
+								//if not found, we throw a 401 not found
 								if (result.length === 0) throw new Error(401);
 								//update the sos request with fulfilled parameter
 								return database.updateItem('request', putTimestamp({
@@ -916,14 +1024,15 @@ module.exports = (database) =>
 									Database.getResult(database.getQueryBuilder('client')
 										.where('email').equals(cid)),
 									//send sos resolved notification to other nearby doctors
-								].concat(sendResolved(database, dids, fulfilled, fcm, args.id)));
+								].concat(sendResolved(database, dids, fulfilled, fcm, args.id, 'doctor')));
 							})
-							//send client details
+							//send client details to doctors
 							.then(updates => {
-								let client = updates[1].deviceID;
+								let clientID = updates[1].deviceID;
+								//we notify the client that sos was accepted
 								return Promise.all([
 									updates[1],
-									client && client !== "null" ? fcm.send({
+									clientID && clientID !== "null" ? fcm.send({
 										to: updates[1].deviceID,
 										data: {
 											title: 'accept',
@@ -932,9 +1041,11 @@ module.exports = (database) =>
 									}) : null
 								]);
 							})
+							//send the doctor client's information
 							.then(results => results[0])
 					}
 				},
+				//method for doctor to decline a sos
 				declineSOS: {
 					type: GraphQLBoolean,
 					description: 'method to reject an existing sosRequest',
@@ -956,12 +1067,16 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, args) =>
+						//hash the password provided
 						hashPassword({password: args.password})
+						//we search for the user with provided credentials
 							.then(({password}) => Database.getResult(database.getQueryBuilder('doctor')
 								.where('email').equals(args.did)
 								.where('password').equals(password)))
 							.then(result => {
+								//if not found, we throw a 401 not found
 								if (result.length === 0) throw new Error(401);
+								//update the request stat of rejection
 								return database.updateItem('request', putTimestamp({
 									id: args.id,
 									rejection: {$add: 1}
@@ -969,6 +1084,7 @@ module.exports = (database) =>
 							})
 							.then(sos => {
 								let resolutions = [true];
+								//if all doctors have rejected the request, we notify the client
 								if (sos.dids.length === sos.rejection)
 									resolutions.concat(Database.getResult(database.getQueryBuilder('client')
 										.where('email').equals(sos.cid).attributes('deviceID'))
@@ -984,8 +1100,10 @@ module.exports = (database) =>
 													}) : null));
 								return Promise.all(resolutions);
 							})
+							//send doctor that his rejection was accepted
 							.then(results => results[0])
 				},
+				//method for client to resolve sos
 				resolveSOS: {
 					type: GraphQLBoolean,
 					args: {
@@ -1007,22 +1125,27 @@ module.exports = (database) =>
 					},
 					resolve: (parent, args) => {
 						let fcm = new FCM(serverKey);
+						//hash the password provided
 						return hashPassword({password: args.password})
+						//we search for the user with provided credentials
 							.then(({password}) => Database.getResult(database.getQueryBuilder('client')
 								.where('email').equals(args.cid)
 								.where('password').equals(password)))
 							.then(result => {
 								if (result.length === 0) throw new Error(401);
-								//update the sos request with fulfilled parameter
+								//update the sos request with resolved parameter
 								return database.updateItem('request', putTimestamp({
 									id: args.id,
 									resolved: true
 								}, 'updatedAt'));
 							})
-							.then(mutated => sendResolved(database, mutated.dids, '', fcm, args.id))
+							//we notify all doctors that the request was resolved
+							.then(mutated => sendResolved(database, mutated.dids, '', fcm, args.id, 'doctor'))
+							//send the user that their request was resolved
 							.then(results => true);
 					}
 				},
+				//method for doctor to accept a transit request
 				acceptTransitRequest: {
 					type: doctorType,
 					description: 'method to accept transitRequest',
@@ -1045,13 +1168,16 @@ module.exports = (database) =>
 					},
 					resolve: (parent, args) => {
 						let fcm = new FCM(serverKey);
+						//hash the password provided
 						return hashPassword({password: args.password})
+						//we search for the user with provided credentials
 							.then(({password}) => Database.getResult(database.getQueryBuilder('transit')
 								.where('email').equals(args.tid)
 								.where('password').equals(password)))
 							.then(result => {
+								//if not found, we throw a 401 not found
 								if (result.length === 0) throw new Error(401);
-								//update the sos request with fulfilled parameter
+								//update the transit request with fulfilled parameter
 								return database.updateItem('transitRequest', putTimestamp({
 									id: args.id,
 									fulfilled: args.tid
@@ -1059,19 +1185,20 @@ module.exports = (database) =>
 							})
 							.then(({fulfilled, did, tids}) => {
 								return Promise.all([
-									//update the selected doctor stat
+									//update the selected transit service stat
 									database.updateItem('transit', putTimestamp({
 										email: fulfilled,
 										accepted: {$add: 1}
 									}, 'updatedAt')),
-									//get the client details to forward to the selected doctor
+									//get the client details to forward to the selected transit services
 									Database.getResult(database.getQueryBuilder('doctor')
 										.where('email').equals(did)),
-									//send sos resolved notification to other nearby doctors
-								].concat(sendResolved(database, tids, fulfilled, fcm, args.id)));
+									//send sos resolved notification to other nearby transit service
+								].concat(sendResolved(database, tids, fulfilled, fcm, args.id, 'transit')));
 							})
-							//send client details
+							//send doctor details
 							.then(updates =>
+								//we notify the doctor that request was accepted
 								Promise.all([
 									updates[1],
 									updates[1].deviceID && updates[1].deviceID !== "null" ?
@@ -1083,9 +1210,11 @@ module.exports = (database) =>
 											}
 										}) : null
 								]))
+							//send the transit service doctor's information
 							.then(results => results[0])
 					}
 				},
+				//method for doctor to decline a transit request
 				declineTransitRequest: {
 					type: GraphQLBoolean,
 					args: {
@@ -1106,12 +1235,16 @@ module.exports = (database) =>
 						}
 					},
 					resolve: (parent, args) =>
+						//hash the password provided
 						hashPassword({password: args.password})
+						//we search for the user with provided credentials
 							.then(({password}) => Database.getResult(database.getQueryBuilder('transit')
 								.where('email').equals(args.tid)
 								.where('password').equals(password)))
 							.then(result => {
+								//if not found, we throw a 401 not found
 								if (result.length === 0) throw new Error(401);
+								//update the request stat of rejection
 								return database.updateItem('transitRequest', putTimestamp({
 									id: args.id,
 									rejection: {$add: 1}
@@ -1119,6 +1252,7 @@ module.exports = (database) =>
 							})
 							.then(sos => {
 								let resolutions = [true];
+								//if all doctors have rejected the request, we notify the client
 								if (sos.tids.length === sos.rejection)
 									resolutions.concat(Database.getResult(database.getQueryBuilder('doctor')
 										.where('email').equals(sos.did).attributes('deviceID'))
@@ -1136,8 +1270,10 @@ module.exports = (database) =>
 									;
 								return Promise.all(resolutions);
 							})
+							//send doctor that his rejection was accepted
 							.then(results => results[0])
 				},
+				//method for client to resolve transit request
 				resolveTransitRequest: {
 					type: GraphQLBoolean,
 					description: 'method to resolve the transitRequest',
@@ -1158,9 +1294,11 @@ module.exports = (database) =>
 							type: new GraphQLNonNull(GraphQLString)
 						}
 					},
-					resolve: (parent, args) =>{
+					resolve: (parent, args) => {
 						let fcm = new FCM(serverKey);
+						//hash the password provided
 						return hashPassword({password: args.password})
+						//we search for the user with provided credentials
 							.then(({password}) => Database.getResult(database.getQueryBuilder('doctor')
 								.where('email').equals(args.did)
 								.where('password').equals(password)))
@@ -1172,7 +1310,9 @@ module.exports = (database) =>
 									resolved: true
 								}, 'updatedAt'));
 							})
-							.then(mutated => sendResolved(database, mutated.tids, '', fcm, args.id))
+							//we notify all doctors that the request was resolved
+							.then(mutated => sendResolved(database, mutated.tids, '', fcm, args.id, 'transit'))
+							//send the user that their request was resolved
 							.then(results => true);
 					}
 				}
